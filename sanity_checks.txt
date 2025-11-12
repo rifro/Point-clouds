@@ -1,0 +1,149 @@
+# Linux:
+nm -D libPluginAutoFit.so | grep Bocari
+# Windows:
+dumpbin /EXPORTS PluginAutoFit.dll | findstr Bocari
+
+strings myplugin.so | grep Bocari. 
+
+Voer MOC handmatig uit (voor testing):
+/usr/lib/qt5/bin/moc myheader.h -o moc_myheader.cpp
+
+
+Controleer: Of AUTOMOC de header met Q_PLUGIN_METADATA daadwerkelijk verwerkt:
+bash
+
+ls build/moc_*.cpp  # Zoek naar gegenereerde MOC-bestanden
+/workdir/projects/C++/CloudCompare/plugins/core/Standard
+
+===
+glxinfo | grep "renderer"
+
+Je wilt:
+
+OpenGL renderer string: NVIDIA GeForce RTX 4070/PCIe/SSE2
+Op de host:
+
+xhost +local:root
+xhost +si:localuser:developer  # indien nodig
+
+Of gebruik xhost + tijdelijk om alle lokale toegang toe te staan (niet persistent/veilig).
+
+
+===
+/workdir/projects/C++/CloudCompare/release/install/bin/CloudCompare
+
+/opt/occt-7.9.1
+/opt/occt-7.9.1/install
+/usr/local/E57Format-3.2-x86_64-gcc13/lib
+/usr/local/E57Format-3.2-x86_64-linux-gnu
+/opt/libE57Format
+
+/usr/bin/ld: cannot find -lcc_plugin_std: No such file or directory
+/usr/bin/ld: cannot find -lqCC_db: No such file or directory
+/usr/bin/ld: cannot find -lCCCoreLib: No such file or directory
+
+find /workdir \
+     /opt/glm \
+     /opt/tmp \
+     /opt/occt-7.9.1 \
+     /opt/occt-7.9.1/install \
+     /usr/local/E57Format-3.2-x86_64-gcc13 \
+     /opt/libE57Format \
+     -type f \( -iname "*plugin*.so" -o -iname "*qcc_db*.so" -o -iname "*corelib*so" \)
+
+Controleer runtime dependencies met ldd
+
+ldd path/to/cc_PluginAutoFit.so
+
+Deze output toont of de .so afhankelijk is van andere libraries (zoals libCCPluginAPI.so, libQCC_DB_LIB.so, enz.), en of die gevonden worden.
+
+    Als je lijnen ziet met => not found, dan mist een dependency of staat de lib niet in je LD_LIBRARY_PATH.
+
+    Voorbeeld output:
+
+libCCPluginAPI.so => /workdir/projects/.../libCCPluginAPI.so (0x00007f...)
+libQCC_DB_LIB.so => not found
+
+===
+readelf -d path/to/cc_PluginAutoFit.so | grep NEEDED
+Als je libCCPluginAPI.so niet in deze lijst ziet staan, dan is het niet gelinkt, en moet je je CMakeLists.txt aanpassen.
+
+
+QPluginLoader
+does not seem to be a valid plugin or it is not supported by this version
+
+/workdir/projects/C++/CloudCompare/libs/CCAppCommon/src/ccPluginManager.cpp
+53, 77, 312, 326, 337, 341
+
+fileName "libQCORE_IO_PLUGIN.so" 
+ path  "/workdir/projects/C++/CloudCompare/debug/install/lib/cloudcompare/plugins/libQCORE_IO_PLUGIN.so" 
+IID  "cccorp.cloudcompare.plugin.qCoreIO" 
+metaDataValid true
++++
+
+ QObject *plugin = loader->instance();
+QObject::connect(QAction, Autofit): invalid nullptr parameter
+
+
+nvidia-smi --query-gpu=driver_version --format=csv,noheader && dpkg -l | grep nvidia-575
+# Toon versie en ondersteunde schema's:
+docker-compose version --short && docker version --format '{{.Client.Version}}'
+
+host:
+~$ sudo apt-mark hold libnvidia-compute-575 libnvidia-gl-575
+[sudo] password for richard: 
+libnvidia-compute-575 set on hold.
+libnvidia-gl-575 set on hold.
+richard@Nerd:~$ nvidia-smi --query-gpu=driver_version --format=csv,noheader && dpkg -l | grep nvidia-575
+575.57.08
+ii  xserver-xorg-video-nvidia-575            575.57.08-0ubuntu1                       amd64        NVIDIA binary Xorg driver
+richard@Nerd:~$ docker-compose version --short && docker version --format '{{.Client.Version}}'
+Command 'docker-compose' not found, but can be installed with:
+sudo snap install docker          # version 28.1.1+1, or
+sudo apt  install docker-compose  # version 1.29.2-6.3
+See 'snap info docker' for additional versions.
+richard@Nerd:~$ 
+
+
+Ik wil helemaal geen swarm
+$ # Check Docker versie
+docker-compose version
+docker version
+
+# Test GPU-toegang
+docker compose run --rm cloud nvidia-smi
+Command 'docker-compose' not found, but can be installed with:
+snap install docker          # version 28.1.1+1, or
+apt  install docker-compose  # version 1.29.2-6.3
+See 'snap info docker' for additional versions.
+Client:
+ Version:           26.1.3
+ API version:       1.45
+ Go version:        go1.22.8
+ Git commit:        26.1.3-0ubuntu1.1
+ Built:             Thu Dec 12 08:27:10 2024
+ OS/Arch:           linux/amd64
+ Context:           default
+
+Server:
+ Engine:
+  Version:          26.1.3
+  API version:      1.45 (minimum version 1.24)
+  Go version:       go1.22.8
+  Git commit:       26.1.3-0ubuntu1.1
+  Built:            Thu Dec 12 08:27:10 2024
+  OS/Arch:          linux/amd64
+  Experimental:     false
+ containerd:
+  Version:          2.0.0~rc3
+  GitCommit:        
+ runc:
+  Version:          1.1.12-0ubuntu4
+  GitCommit:        
+ docker-init:
+  Version:          0.19.0
+  GitCommit:        
+no configuration file provided: not found
+developer@Nerd:/usr/lib/x86_64-linux-gnu$ 
+
+wear leveling

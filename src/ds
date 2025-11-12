@@ -1,0 +1,119 @@
+ccPointCloud* ccCloud = new ccPointCloud("VoxelCheckerboard");
+if(!ccCloud)
+{
+    std::cout << "Error: Failed to create rotated sampled cloud" << std::endl;
+    return;
+}
+if(!ccCloud->reserve(U32(voxelManager.groupedPoints.size())))
+{
+    delete ccCloud;
+    return;
+}
+
+// Stap 1: Voeg ALLE punten eerst toe aan de cloud
+std::cout << "Adding points to cloud..." << std::endl;
+for(u32 v = 0; v < Bin; ++v)
+{
+    for(u32 i = 0; i < voxelManager.m_voxelCounts[v]; ++i)
+    {
+        u32           j = voxelManager.m_voxelStarts[v] + i;
+        Pointcloud::Point& p = voxelManager.groupedPoints[j];
+        CCVector3          ccPoint{p.m_point.x, p.m_point.y, p.m_point.z};
+        ccCloud->addPoint(ccPoint);
+    }
+}
+std::cout << "Cloud size: " << ccCloud->size() << std::endl;
+
+// Stap 2: Nu pas de scalar field maken en toevoegen
+std::cout << "Creating scalar field..." << std::endl;
+ccScalarField* sf = new ccScalarField("ColoredPoints");
+
+// BELANGRIJK: Reserveer de exacte grootte
+if(!sf->reserve(ccCloud->size()))
+{
+    std::cout << "Failed to reserve scalar field!" << std::endl;
+    sf->release();
+    delete ccCloud;
+    return;
+}
+
+// Stap 3: Vul de scalar field
+auto odd = [](u32 x) -> bool { return (x & 1) != 0; };
+
+u32 pointIndex = 0;
+for(u32 v = 0; v < Bin; ++v)
+{
+    u32 x, y, z;
+    Bocari::Voxelprocessing::unflatten3<c_voxel>(v, z, y, x);
+    bool odds = odd(x) ^ odd(y) ^ odd(z);
+
+    for(u32 i = 0; i < voxelManager.m_voxelCounts[v]; ++i)
+    {
+        float value = odds ? 1.0f : 0.0f;
+        sf->addElement(value);  // Gebruik addElement in plaats van setValue!
+        
+        if (pointIndex < 10) {
+            std::cout << "Added SF[" << pointIndex << "] = " << value << std::endl;
+        }
+        
+        pointIndex++;
+    }
+}
+
+std::cout << "SF final size: " << sf->size() << std::endl;
+
+// Stap 4: Voeg scalar field toe aan cloud
+int sfIndex = ccCloud->addScalarField(sf);
+std::cout << "Scalar field index: " << sfIndex << std::endl;
+
+if (sfIndex < 0) {
+    std::cout << "Failed to add scalar field to cloud!" << std::endl;
+    sf->release();
+    delete ccCloud;
+    return;
+}
+
+// Stap 5: Compute min/max
+sf->computeMinAndMax();
+std::cout << "Scalar field range: " << sf->getMin() << " to " << sf->getMax() << std::endl;
+
+// Stap 6: Configureer display
+ccCloud->setCurrentScalarField(sfIndex);
+ccCloud->setCurrentDisplayedScalarField(sfIndex);
+ccCloud->showSF(true);
+ccCloud->setPointSize(2.0f);
+
+ccScalarField* currentSF = static_cast<ccScalarField*>(ccCloud->getScalarField(sfIndex));
+if (currentSF)
+{
+    currentSF->setMinDisplayed(0.0f);
+    currentSF->setMaxDisplayed(1.0f);
+    currentSF->setSaturationStart(0.0f);
+    currentSF->setSaturationStop(1.0f);
+    
+    ccColorScale::Shared colorScale = ccColorScale::Create("Checkerboard");
+    if (colorScale)
+    {
+        colorScale->insert(ccColorScaleElement(0.0, Qt::red), false);
+        colorScale->insert(ccColorScaleElement(1.0, Qt::blue), false);
+        colorScale->update();
+        currentSF->setColorScale(colorScale);
+        std::cout << "Color scale configured" << std::endl;
+    }
+}
+
+ccCloud->showSFColorsScale(true);
+ccCloud->prepareDisplayForRefresh();
+
+// Voeg toe aan CC
+ccHObject* parent = m_selectedCloud->getParent();
+if(parent)
+{
+    parent->addChild(ccCloud);
+}
+
+m_app->addToDB(ccCloud);
+m_app->setSelectedInDB(ccCloud, true);
+m_app->refreshAll();
+
+std::cout << "Voxel checkerboard cloud created successfully!" << std::endl;

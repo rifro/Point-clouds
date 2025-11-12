@@ -1,0 +1,284 @@
+FILE_BEGIN include/otndc.h
+#pragma once
+#include <cuda_runtime.h>
+#include <stdint.h>
+
+// === Resultaat voor hoofdassen ===
+struct AssenResultaat {
+    float v[3][3];   // 3 assen (unit)
+    float score[3];  // sterkte per as (aantal gewogen stemmen)
+    int   dimensie;  // 1D/2D/3D (hier: 1 of 2 of 3 als we later uitbreiden)
+};
+
+// === Config (OTNDC) ===
+// Namen NL; geen magic numbers.
+struct OTConfig {
+    // Boeren-ring (ruisfilter)
+    float binnenStraal2;   // min ring (kwadraat)
+    float buitenStraal2;   // max ring (kwadraat)
+
+    // Paar-acceptatie (orthogonaliteit)
+    // Voor "hoek >= 20°" gebruiken we |dot| <= cos(70°) ~= 0.342.
+    float maxDotOrtho;     // max |dot(n1,n2)| om kruispaar toe te laten (bv 0.34)
+
+    // Warmup/minimum
+    int   warmupMin;       // minimum stemmen om een richting te houden (host-reduce)
+
+    // Kernel/block
+    int   blokGrootte;     // threads per blok (bv 256)
+    int   partnerZoekRadius; // max offset in tile om partner te zoeken (bv 32)
+};
+
+// Interne slot-accu voor as-samples (globaal).
+struct OTAsAccu {
+    float3 som;    // vectorsom van a-samples
+    int    count;  // aantal (gewogen) stemmen
+};
+
+// Run via paren → schat een top-as richting (v[0])
+// x/y/z: arrays met punten (getransleerde cloud: stralen ≈ p/|p|)
+// N: aantal punten
+// out: vult v[0], score[0], dimensie (>=1 als er steun is)
+void runOTNDC_pairs(
+    const float* x, const float* y, const float* z, int N,
+    AssenResultaat* out,
+    const OTConfig& cfg);
+
+
+FILE_END
+
+FILE_BEGIN src/k_pairs_bucket.cu
+
+
+#include <cuda_runtime.h>
+#include <math_constants.h>
+#include "otndc.h"
+
+// ============ device helpers ============
+__device__ __forceinline__ float3 make3(float x,float y,float z){return make_float3(x,y,z);}
+__device__ __forceinline__ float  dot3(float3 a,float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
+__device__ __forceinline__ float3 cross3(float3 a,float3 b){
+    return make3( a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x );
+}
+__device__ __forceinline__ float3 norm3(float3 v){
+    float n2 = v.x*v.x + v.y*v.y + v.z*v.z;
+    if(n2 < 1e-20f) return make3(0,0,0);
+    float inv = rsqrtf(n2);
+    return make3(v.x*inv, v.y*inv, v.z*inv);
+}
+
+// ============ kernel ============
+// Per punt -> straal (v). In gedeeld geheugen een tile.
+// Voor elk v: zoek binnen +- partnerZoekRadius in de tile 1 partner u
+// met |dot(v,u)| <= maxDotOrtho; kies de beste (kleinste |dot|).
+// Voeg a = normalize(cross(v,u)) bij aan globale accumulator met gewicht sin(theta).
+extern "C" __global__
+void k_otndc_pairs(
+    const float* __restrict__ x,
+    const float* __restrict__ y,
+    const float* __restrict__ z,
+    int N,
+    float binnen2, float buiten2,
+    float maxDotOrtho,
+    int partnerZoekRadius,
+    OTAsAccu* __restrict__ gAccu)
+{
+    extern __shared__ float sMem[]; // layout: vx[], vy[], vz[]
+    float* sx = sMem;
+    float* sy = sx + blockDim.x;
+    float* sz = sy + blockDim.x;
+
+    const int gid  = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Laad tile stralen (met ringfilter)
+    float3 v = make3(0,0,0);
+    if(gid < N){
+        float3 p = make3(x[gid], y[gid], z[gid]);
+        float r2 = dot3(p,p);
+        if(r2 >= binnen2 && r2 <= buiten2) {
+            v = norm3(p); // straal = genormaliseerde plaatsvector
+        }
+    }
+    sx[threadIdx.x] = v.x;
+    sy[threadIdx.x] = v.y;
+    sz[threadIdx.x] = v.z;
+    __syncthreads();
+
+    // Zoek één partner in de tile
+    if(gid >= N) return;
+    if(v.x==0.f && v.y==0.f && v.z==0.f) return; // buiten ring
+
+    float bestAbsDot = 1e9f;
+    float3 bestU = make3(0,0,0);
+
+    // Zoek rondom huidige thread (beperkt venster)
+    const int t = threadIdx.x;
+    const int L = max(0, t - partnerZoekRadius);
+    const int R = min(blockDim.x-1, t + partnerZoekRadius);
+
+    for(int j=L; j<=R; ++j){
+        if(j==t) continue;
+        float3 u = make3(sx[j], sy[j], sz[j]);
+        if(u.x==0.f && u.y==0.f && u.z==0.f) continue;
+
+        float d = fabsf(dot3(v,u)); // |cos theta|
+        if(d <= maxDotOrtho && d < bestAbsDot){
+            bestAbsDot = d;
+            bestU = u;
+        }
+    }
+
+    if(bestAbsDot==1e9f) return; // geen geschikte partner
+
+    // Kruisproduct → as-sample
+    float3 a = cross3(v, bestU);
+    float a2 = dot3(a,a);
+    if(a2 < 1e-20f) return;
+    float inv = rsqrtf(a2);
+    a.x *= inv; a.y *= inv; a.z *= inv;
+
+    // Gewicht: sin(theta) = sqrt(1 - cos^2)
+    float w = sqrtf( fmaxf(0.f, 1.f - bestAbsDot*bestAbsDot) );
+
+    // Atomics naar globale accu
+    atomicAdd(&gAccu->som.x, a.x * w);
+    atomicAdd(&gAccu->som.y, a.y * w);
+    atomicAdd(&gAccu->som.z, a.z * w);
+    atomicAdd(&gAccu->count, 1);
+}
+
+
+FILE_END
+
+FILE_BEGIN src/h_axis_fit.cu
+
+
+#include <cuda_runtime.h>
+#include <algorithm>
+#include <vector>
+#include <cmath>
+#include <iostream>
+
+#include "otndc.h"
+
+// small helper
+static inline void cudaCheck(cudaError_t e, const char* msg){
+    if(e!=cudaSuccess){
+        std::cerr<<"CUDA fout: "<<msg<<": "<<cudaGetErrorString(e)<<"\n";
+        std::abort();
+    }
+}
+static inline float3 make3(float x,float y,float z){return make_float3(x,y,z);}
+
+extern "C" void k_otndc_pairs(
+    const float*, const float*, const float*, int,
+    float, float, float, int, OTAsAccu*);
+
+void runOTNDC_pairs(
+    const float* x,const float* y,const float* z,int N,
+    AssenResultaat* out,const OTConfig& cfg)
+{
+    // Globale accumulator
+    OTAsAccu* dAccu = nullptr;
+    cudaCheck(cudaMalloc(&dAccu, sizeof(OTAsAccu)), "malloc dAccu");
+    cudaCheck(cudaMemset(dAccu, 0, sizeof(OTAsAccu)), "memset dAccu");
+
+    // Kernelconfig
+    const int B = (cfg.blokGrootte>0? cfg.blokGrootte:256);
+    const int G = (N + B - 1)/B;
+    const size_t shmem = 3 * B * sizeof(float); // sx,sy,sz
+
+    // Launch
+    k_otndc_pairs<<<G, B, shmem>>>(
+        x,y,z,N,
+        cfg.binnenStraal2, cfg.buitenStraal2,
+        cfg.maxDotOrtho,
+        cfg.partnerZoekRadius,
+        dAccu);
+    cudaCheck(cudaGetLastError(), "launch k_otndc_pairs");
+    cudaCheck(cudaDeviceSynchronize(), "sync k_otndc_pairs");
+
+    // Host reduce
+    OTAsAccu hAccu{};
+    cudaCheck(cudaMemcpy(&hAccu, dAccu, sizeof(OTAsAccu), cudaMemcpyDeviceToHost), "cpy accu");
+    cudaCheck(cudaFree(dAccu), "free accu");
+
+    // Normeer richting
+    float len = std::sqrt(hAccu.som.x*hAccu.som.x + hAccu.som.y*hAccu.som.y + hAccu.som.z*hAccu.som.z);
+    int dim = 0;
+    if(hAccu.count >= cfg.warmupMin && len > 1e-8f){
+        out->v[0][0] = hAccu.som.x / len;
+        out->v[0][1] = hAccu.som.y / len;
+        out->v[0][2] = hAccu.som.z / len;
+        out->score[0] = static_cast<float>(hAccu.count);
+        dim = 1;
+    }
+    out->dimensie = dim;
+
+    // (Slots 2 en 3 blijven leeg in deze fase)
+    for(int i=1;i<3;i++){ out->v[i][0]=out->v[i][1]=out->v[i][2]=0.f; out->score[i]=0.f; }
+}
+
+
+FILE_END
+
+FILE_BEGIN src/demo_axis2.cpp
+
+
+#include "otndc.h"
+#include <vector>
+#include <iostream>
+#include <cmath>
+#include <random>
+
+// Synthetische test: cilinder rond X-as (asrichting moet ~ (1,0,0) worden).
+int main(){
+    const int turns = 2000;     // aantal "ringen" langs x
+    const float lengte = 5.0f;  // 5 m
+    const float r = 0.10f;      // 10 cm
+    const float sigma = 0.003f; // 3 mm jitter
+    const int perRing = 256;    // punten per ring
+
+    const int N = turns * perRing;
+    std::vector<float> x(N), y(N), z(N);
+
+    std::mt19937 rng(42);
+    std::normal_distribution<float> noise(0.0f, sigma);
+
+    for(int i=0;i<turns;i++){
+        float t = (float)i/(turns-1);
+        float X = -lengte*0.5f + t * lengte;
+        for(int k=0;k<perRing;k++){
+            float ang = (2.0f*float(M_PI))* (float)k / (float)perRing;
+            int idx = i*perRing + k;
+            x[idx] = X + noise(rng)*0.1f; // klein
+            y[idx] = r*std::cos(ang) + noise(rng);
+            z[idx] = r*std::sin(ang) + noise(rng);
+        }
+    }
+
+    OTConfig cfg{};
+    // Ring (we gebruiken hele cloud; zet ring ruim open zodat alles meedoet)
+    cfg.binnenStraal2 = 0.0f;
+    cfg.buitenStraal2 = (lengte*lengte + 4*r*r)*2.0f; // ruime bovengrens
+
+    // Orthogonaliteit (>=~20°): |dot| <= cos(70°) ≈ 0.342
+    cfg.maxDotOrtho = 0.35f;
+
+    cfg.warmupMin = 100;     // min stemmen om richting te accepteren
+    cfg.blokGrootte = 256;
+    cfg.partnerZoekRadius = 32;
+
+    AssenResultaat out{};
+    runOTNDC_pairs(x.data(), y.data(), z.data(), N, &out, cfg);
+
+    std::cout<<"Dimensie: "<<out.dimensie<<"\n";
+    if(out.dimensie>=1){
+        std::cout<<"As 0: "<<out.v[0][0]<<","<<out.v[0][1]<<","<<out.v[0][2]
+                 <<"  score="<<out.score[0]<<"\n";
+    }
+    return 0;
+}
+
+
+FILE_END

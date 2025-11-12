@@ -1,0 +1,21 @@
+{
+  "type": "Standard",
+  "core" : false,
+  "name": "Autofit",
+  "icon": "/workdir/projects/C++/PluginAutoFit/icons/bochtje50.png",
+  "description": "Vind buizen en bochten",
+  "authors": [
+    {
+      "name": "Richard Rombouts",
+      "email": "rf.rombouts@gmail.com"
+    }
+  ],
+  "maintainers": [
+    {
+      "name": "Richard Rombouts",
+      "email": "rf.rombouts@gmail.com"
+    }
+  ],
+  "references": [
+  ]
+}

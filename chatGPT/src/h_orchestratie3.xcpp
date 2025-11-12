@@ -1,0 +1,169 @@
+#include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <cmath>
+#include "include/config.h"
+#include "include/wiskunde_utils.cuh"
+
+// Kleine helper
+static inline float clampf(float x, float a, float b) {
+    return std::max(a, std::min(b, x));
+}
+
+// ---- Host visualisatie van nudge (preview twee-as rotatie) ----
+namespace hostvis {
+
+static inline void print_frame_nudge_preview(const Vec3f& asX,
+                                             const Vec3f& asY,
+                                             const Vec3f& asZ)
+{
+    Vec3f Z{0,0,1};
+    Vec3f v = cross(Z, asZ);
+    float c = dot(Z, asZ);
+    float ang = std::acos( std::clamp(c, -1.0f, 1.0f) );
+    Quat qz = (std::fabs(ang) < 1e-6f) ? Quat{1,0,0,0} 
+                                      : quat_from_axis_angle(v, ang);
+
+    Vec3f X{1,0,0};
+    Vec3f Xp = quat_rotate(qz, X);
+    Vec3f t  = cross(Xp, asX);
+    float c2 = dot(Xp, asX);
+    float ang2 = std::acos( std::clamp(c2, -1.0f, 1.0f) );
+    Quat qx = (std::fabs(ang2) < 1e-6f) ? Quat{1,0,0,0}
+                                       : quat_from_axis_angle(t, ang2);
+
+    Quat q = quat_mul(qx, qz);
+
+    float yawDeg=0.f, pitchDeg=0.f;
+    quat_to_ZY_angles(q, yawDeg, pitchDeg);
+
+    float clip = cfg::get().stemmen.clipKleinGraads;
+    clip_small_degrees(clip, yawDeg);
+    clip_small_degrees(clip, pitchDeg);
+
+    float maxLock = cfg::get().stemmen.maxLockGraads;
+    bool reject   = (std::fabs(yawDeg) > maxLock ||
+                     std::fabs(pitchDeg) > maxLock);
+
+    std::cout << "[FrameCheck] Rotaties (Z,Y): yaw=" 
+              << yawDeg << "°, pitch=" << pitchDeg << "°";
+    if (reject) {
+        std::cout << " [REJECT >" << maxLock << "°]";
+    }
+    std::cout << "\n";
+}
+
+} // namespace hostvis
+
+// ---- Statistiek voor log ----
+struct StatBlok {
+    uint32_t hitsTotaal   = 0;
+    uint32_t hitsNieuw    = 0;
+    uint32_t nearCount    = 0;
+    uint32_t okCount      = 0;
+    uint32_t slotCount    = 0;
+    float    dHoekDeg     = 0.f;
+    float    varCos       = 0.f;
+    bool     locked       = false;
+};
+
+static inline void log_status(const StatBlok& s)
+{
+#if ORCH_LOG_TO_FILE
+    static std::ofstream flog("log.txt", std::ios::app);
+    if (flog.good()) {
+        flog << "hits+=" << s.hitsNieuw
+             << " total=" << s.hitsTotaal
+             << " near="  << s.nearCount
+             << " ok="    << s.okCount
+             << " slots=" << s.slotCount
+             << " dHoek=" << std::fixed << std::setprecision(ORCH_LOG_PREC_DEG)
+             << s.dHoekDeg << "°"
+             << " varCos=" << std::setprecision(ORCH_LOG_PREC_VAR)
+             << s.varCos
+             << " " << (s.locked ? "LOCKED" : "-")
+             << "\n";
+        flog.flush();
+    }
+#endif
+
+    std::cout << "hits+=" << s.hitsNieuw
+              << " total=" << s.hitsTotaal
+              << " near="  << s.nearCount
+              << " ok="    << s.okCount
+              << " slots=" << s.slotCount
+              << " dHoek=" << std::fixed << std::setprecision(ORCH_LOG_PREC_DEG)
+              << s.dHoekDeg << "°"
+              << " varCos=" << std::setprecision(ORCH_LOG_PREC_VAR)
+              << s.varCos
+              << " " << (s.locked ? "LOCKED" : "-")
+              << std::endl;
+}
+
+// ---- Hoofdlus (dummy poll voorbeeld) ----
+// In jouw echte code: call deze na elke batch votes
+void h_run_orchestratie_logging_loop()
+{
+    StatBlok acc;
+    uint32_t intervalHits = 0;
+
+    for (;;) {
+        // TODO: fetch real device counters
+        uint32_t newlyAccepted = 0;
+        uint32_t nearIn        = 0;
+        uint32_t okIn          = 0;
+        uint32_t activeSlots   = 0;
+        float    dHoekDegSample= 0.f;
+        float    varCosSample  = 0.f;
+        bool     lockedNow     = false;
+
+        // ---- Dummy exit condition (replace!) ----
+        static int dummyIters = 0;
+        if (++dummyIters > 1) break;
+
+        newlyAccepted  = ORCH_LOG_INTERVAL;
+        nearIn         = ORCH_LOG_INTERVAL * 3 / 4;
+        okIn           = ORCH_LOG_INTERVAL * 1 / 4;
+        activeSlots    = 3;
+        dHoekDegSample = 0.18f;
+        varCosSample   = 0.0017f;
+        lockedNow      = true;
+        // -----------------------------------------
+
+        intervalHits       += newlyAccepted;
+        acc.hitsTotaal     += newlyAccepted;
+        acc.nearCount      += nearIn;
+        acc.okCount        += okIn;
+        acc.slotCount       = activeSlots;
+        acc.dHoekDeg        = dHoekDegSample;
+        acc.varCos          = varCosSample;
+        acc.locked          = lockedNow;
+
+        if (intervalHits >= ORCH_LOG_INTERVAL) {
+            StatBlok out = acc;
+            out.hitsNieuw = intervalHits;
+            log_status(out);
+            intervalHits = 0;
+            acc.nearCount = 0;
+            acc.okCount   = 0;
+        }
+
+        if (lockedNow) {
+            if (intervalHits > 0) {
+                StatBlok out = acc;
+                out.hitsNieuw = intervalHits;
+                out.locked    = true;
+                log_status(out);
+                intervalHits = 0;
+            }
+
+            // ====== Hier roep jij de preview aan ======
+            Vec3f asX{1,0,0}, asY{0,1,0}, asZ{0,0,1}; 
+            // ↑↑ in echte code vervang door jouw slot->finalAxes
+            hostvis::print_frame_nudge_preview(asX,asY,asZ);
+
+            break;
+        }
+    }
+}
+

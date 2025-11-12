@@ -1,0 +1,88 @@
+# ============================================
+# BUILD DIRECTORY: we sluiten alles uit behalve moc/ en daarbinnen .cpp en .h
+# ============================================
+/build/*
+!/build/moc/
+/build/moc/*
+!/build/moc/*.cpp
+!/build/moc/*.h
+
+# ============================================
+# ANDERE DIRECTORIES DIE WE UITSLUITEN
+# ============================================
+/bin/
+/lib/
+/test_moc/
+/.cache/
+/CMakeFiles/
+
+# ============================================
+# CMAKE GENERATED FILES
+# ============================================
+CMakeCache.txt
+cmake_install.cmake
+CMakeGUI.json
+compile_commands.json
+build.ninja
+.ninja_deps
+.ninja_log
+
+# ============================================
+# COMPILED BINARIES & OBJECT FILES
+# ============================================
+*.o
+*.obj
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+
+# ============================================
+# QT CONFIGURATIE FILES (geen source)
+# ============================================
+*.moc
+*.qrc.d
+.qmake.stash
+
+# ============================================
+# DEBUG FILES
+# ============================================
+*.pdb
+*.idb
+*.su
+
+# ============================================
+# TEMPORARY FILES
+# ============================================
+*~           # Editor backup files
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# ============================================
+# IDE CONFIGURATIES
+# ============================================
+/.vscode/
+/.idea/
+
+# ============================================
+# PLATFORM SPECIFIEK
+# ============================================
+.DS_Store
+Thumbs.db
+
+# ============================================
+# LOG FILES
+# ============================================
+*.log
+cmake_build.log
+
+# ============================================
+# PROJECT SPECIFIEK uitsluiten
+# ============================================
+/images/
+
