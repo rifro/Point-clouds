@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ARCH=sm_89
+__host__=/usr/bin/g++
+CUDA=/usr/local/cuda/bin/nvcc
+
+INC="-Iinclude -I/usr/local/cuda/include"
+SRC="src/h_do_optimize_frame3.cpp 
+src/k_voxeliseer_morton.cu 
+src/k_ruis_boeren.cu 
+src/k_vlak_vote.cu 
+src/k_buis_vote.cu 
+src/k_reduce_groepen.cu 
+src/k_planair_regressie.cu 
+src/k_rotatie_quat.cu 
+src/k_fine_slabs_cyl.cu"
+
+# Tijdens deel 1 ontbreken sommige .cu: compileer wat er is (ignore missing)
+
+FILTERED_SRC=""
+for f in $SRC; do
+if [ -f "$f" ]; then FILTERED_SRC+="$f "; fi
+done
+
+OUT="autofit_gpu"
+
+echo "[nv] Bouwen met nvcc ($ARCH) ..."
+$CUDA 
+-arch=${ARCH} 
+-ccbin=${__host__} 
+-std=c++20 
+--extended-lambda 
+--relaxed-constexpr 
+-Xcompiler "-O2 -fPIC" 
+$INC 
+$FILTERED_SRC 
+-o ${OUT}
+
+echo "✅ Klaar: ./${OUT}"

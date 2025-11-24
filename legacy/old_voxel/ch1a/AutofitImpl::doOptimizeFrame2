@@ -1,0 +1,96 @@
+#include "otndc.h"
+#include <vector>
+#include <iostream>
+#include <cmath>
+
+// ... bovenin autofit_impl.cpp, samen met je andere includes ...
+
+void AutofitImpl::doOptimizeFrame2()
+{
+    // 1) Cloud ophalen uit CC
+    // TODO 1: vervang dit stuk door jouw echte manier om punten uit de actieve CC-cloud te lezen.
+    // Idee: je hebt waarschijnlijk iets als m_cloud of m_points.
+    std::vector<Vec3f> punten;
+    punten.reserve(m_cloudSize); // TODO: vervang m_cloudSize
+    for (std::size_t i = 0; i < m_cloudSize; ++i) {
+        // TODO: vervang getPoint(i) door jouw eigen API / data.
+        const auto& P = getPoint(i); // bijvoorbeeld een CCVector3 of jouw Point-type
+        Vec3f v;
+        v.x = P.x;
+        v.y = P.y;
+        v.z = P.z;
+        punten.push_back(v);
+    }
+
+    if (punten.size() < 1000) {
+        std::cout << "[OTNDC] te weinig punten (" << punten.size()
+                  << "), sla ideal frame detectie over.\n";
+        return;
+    }
+
+    // 2) Boeren-ring instellen (in meter of mm, afhankelijk van jouw units)
+    // We hadden afgesproken in mm te werken. Stel dat jouw punten in mm staan:
+    // binnenStraal ~ 10 cm, buitenStraal ~ 3 m => in mm: 100 en 3000.
+    const float binnen = 100.0f;   // 10 cm
+    const float buiten  = 3000.0f; // 3 m
+    OTConfig cfg;
+    cfg.binnenStraalSqd = binnen * binnen;
+    cfg.buitenStraalSqd = buiten * buiten;
+    cfg.maxSlots        = 16;
+    cfg.minCountPerSlot = 64;  // minimaal aantal stralen per richting
+
+    AssenResultaat asOut{};
+    runOTNDC_simple(punten.data(),
+                    static_cast<uint32_t>(punten.size()),
+                    cfg,
+                    asOut);
+
+    std::cout << "[OTNDC] dimensie: " << asOut.dimensie << "\n";
+    for (int i = 0; i < asOut.dimensie; ++i) {
+        std::cout << "  as " << i
+                  << " = (" << asOut.v[i][0]
+                  << ", "   << asOut.v[i][1]
+                  << ", "   << asOut.v[i][2]
+                  << "), score = " << asOut.score[i] << "\n";
+    }
+
+    // 3) Hoeken t.o.v. huidige CC-as (X,Y,Z) berekenen
+    // Stel dat de huidige wereld-as in CC is:
+    const float3 ex = make_float3(1.f, 0.f, 0.f);
+    const float3 ey = make_float3(0.f, 1.f, 0.f);
+    const float3 ez = make_float3(0.f, 0.f, 1.f);
+
+    auto dot3 = [](float3 a, float3 b) {
+        return a.x*b.x + a.y*b.y + a.z*b.z;
+    };
+
+    auto to3 = [](const float v[3]) {
+        return make_float3(v[0], v[1], v[2]);
+    };
+
+    auto deg = [](float rad){ return rad * 180.0f / float(M_PI); };
+
+    for (int i = 0; i < asOut.dimensie; ++i) {
+        float3 v = to3(asOut.v[i]);
+        float dx = std::clamp(dot3(v, ex), -1.0f, 1.0f);
+        float dy = std::clamp(dot3(v, ey), -1.0f, 1.0f);
+        float dz = std::clamp(dot3(v, ez), -1.0f, 1.0f);
+
+        float ax = std::acos(std::fabs(dx));
+        float ay = std::acos(std::fabs(dy));
+        float az = std::acos(std::fabs(dz));
+
+        std::cout << "  as " << i << " hoeken tov (X,Y,Z): "
+                  << " (" << deg(ax) << "°, "
+                  <<       deg(ay) << "°, "
+                  <<       deg(az) << "°)\n";
+    }
+
+    // 4) (Optioneel, voor debug in CC)
+    // Hier kun je nu een rotatie bepalen (b.v. yaw/pitch) die de sterkste as
+    // align’t met Z of X, en dan de cloud in CC draaien.
+    //
+    // Voor nu: alleen logging. Rotatie in CC kun je handmatig doen of
+    // we kunnen later een helper maken die jouw CC-matrix direct aanpast.
+}
+

@@ -1,4 +1,4 @@
-// === context: host/assen_hernoemen.hpp ===
+// === context: __host__/assen_hernoemen.hpp ===
 #include <array>
 #include <algorithm>
 #include <iostream>

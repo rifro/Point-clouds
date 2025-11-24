@@ -226,61 +226,160 @@ void AutofitImpl::doOptimizeFrame1()
     std::cout << "Voxel checkerboard cloud created successfully!" << std::endl;
 }
 
-void AutofitImpl::doOptimizeFrame2()
-{
-    if(!m_selectedCloud || m_selectedCloud->size() == 0)
-    {
-        std::cout << "Geen point cloud of lege cloud\n";
+// Full square method: Fill data, sort on V descending for perm, adjust for square aspect <=1:2
+void AutofitImpl::make_square_method(const ccPointCloud& cloud, array<AxisAccess, 3>& axes) {
+    CCVector3 bbMin, bbMax;
+    cloud.getBoundingBox(bbMin, bbMax);
+    const size_t N = cloud.size();
+    const float L[3] = {bbMax.x - bbMin.x, bbMax.y - bbMin.y, bbMax.z - bbMin.z};
+    float maxL = *max_element(L, L + 3);
+    if (maxL <= 0) return;  // Degenerate
+
+    // Target total voxels ~1024 (adaptive on BB, for perf: coarse grid without overflow)
+    const uint32_t target_total = 1024;
+    uint32_t V_init[3];
+    for (int i = 0; i < 3; ++i) {
+        V_init[i] = max(1u, static_cast<uint32_t>(target_total * (L[i] / maxL)));  // Scale to dims
+    }
+
+    // Initial array with getters
+    array<AxisAccess, 3> init_axes;
+    init_axes[0] = {'x', {}, V_init[0], [](const auto* p) { return p->x; }};
+    init_axes[1] = {'y', {}, V_init[1], [](const auto* p) { return p->y; }};
+    init_axes[2] = {'z', {}, V_init[2], [](const auto* p) { return p->z; }};
+
+    // Fill owned data (batch read)
+    for (auto& ax : init_axes) {
+        ax.data.resize(N);
+        for (size_t i = 0; i < N; ++i) {
+            const CCVector3* p = cloud.getPoint(i);
+            ax.data[i] = ax.getter(p);
+        }
+    }
+
+    // Sort array on V descending (Vx long, Vz short) – perm forward
+    sort(init_axes.begin(), init_axes.end(), [](const auto& a, const auto& b) { return a.V > b.V; });
+
+    // Square adjustment: Ensure Vy ≈ Vz (aspect <=1:2), recalc Vx for total ~target
+    uint32_t target_doorsnede = static_cast<uint32_t>(sqrt(init_axes[1].V * init_axes[2].V));
+    if (init_axes[1].V > init_axes[2].V * 2) init_axes[1].V = init_axes[2].V * 2;  // Cap aspect
+    init_axes[0].V = max(1u, target_total / target_doorsnede);  // Adjust slices
+
+    // Assign to output axes (sorted order)
+    axes = init_axes;
+
+    // Report #regions = Vx (slices along long)
+    cout << "Square method: Vx=" << axes[0].V << " Vy=" << axes[1].V << " Vz=" << axes[2].V
+         << " (#regions=" << axes[0].V << ", aspect " << static_cast<float>(axes[1].V) / axes[2].V << ":1)" << endl;
+}
+
+void AutofitImpl::doOptimizeFrame2() {
+    if (!m_selectedCloud || m_selectedCloud->size() == 0) {
+        std::cout << "[Autofit] Geen point cloud of leeg.\n";
         return;
     }
 
-    CCVector3 bbMin, bbMax;
-    m_selectedCloud->getBoundingBox(bbMin, bbMax);
+    const size_t N = m_selectedCloud->size();
 
-    // Bepaal Sx, Sy, Sz op basis van jouw "vierkant-houden" + regio’s.
-    // (Hier placeholder; hang dit aan jouw regioneringslogica.)
-    uint32_t Sx = /*...*/ 64;
-    uint32_t Sy = /*...*/ 64;
-    uint32_t Sz = /*...*/ 32;
+    // 1) Vierkant-methode: Fill & sort axes on V (owned data, no pointers)
+    array<AxisAccess, 3> axes;
+    make_square_method(*m_selectedCloud, axes);  // Fills axes[0..2].data with permuted coords
 
-    // Maak accessor-lijst met huidige asvolgorde
-    std::array<Toegang, 3> ax = {{{'x', [](auto* p) { return p->x; }, Sx},
-                                  {'y', [](auto* p) { return p->y; }, Sy},
-                                  {'z', [](auto* p) { return p->z; }, Sz}}};
+    // Num regions from Vx
+    const uint32_t num_regions = axes[0].V;
 
-    // Forceer Sx ≥ Sy ≥ Sz en onthoud welke as waarheen verhuisde
-    orden_axes_op_S(ax); // ax[0] → newX, ax[1] → newY, ax[2] → newZ
+    std::cout << "[A] Morton-sort en permutatie (" << num_regions << " regions)... " << std::flush;
 
-    // Bouw host-buffers (SoA + labels)
-    const size_t        N = m_selectedCloud->size();
-    std::vector<float3> punten;
-    punten.reserve(N);
-
-    // vertaal/scale → hier enkel copy, echte translatie/scale kan op GPU in init-kernel
-    for(size_t i = 0; i < N; ++i)
-    {
-        const CCVector3* pt = m_selectedCloud->getPoint(static_cast<unsigned>(i));
-        if(!pt) continue;
-        float X = ax[0].get(pt);
-        float Y = ax[1].get(pt);
-        float Z = ax[2].get(pt);
-        punten.push_back(make_float3(X, Y, Z));
+    // 2) Upload owned SoA data as float3 (merge on host for coalesced upload)
+    vector<float3> h_pts(N);
+    for (size_t i = 0; i < N; ++i) {
+        h_pts[i] = make_float3(axes[0].data[i], axes[1].data[i], axes[2].data[i]);
     }
 
-    // Labels initialiseren
-    enum Label : uint32_t { LABEL_GEEN = 0, LABEL_RUIS = 1, LABEL_VLAK = 2, LABEL_BUIS = 3 };
-    std::vector<uint32_t> labels(punten.size(), LABEL_GEEN);
+    DeviceBuffer<float3> d_pts(N);
+    d_pts.upload(h_pts.data(), N);
 
-    // Device allocs/kopie
-    float3*   d_punten = nullptr;
-    uint32_t* d_labels = nullptr;
-    cudaMalloc((void**)&d_punten, punten.size() * sizeof(float3));
-    cudaMalloc((void**)&d_labels, punten.size() * sizeof(uint32_t));
-    cudaMemcpy(d_punten, punten.data(), punten.size() * sizeof(float3), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_labels, labels.data(), labels.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    DeviceBuffer<uint64_t> d_keys(N);
+    DeviceBuffer<uint32_t> d_index(N);
+    DeviceBuffer<float3> d_pts_sorted(N);
+    DeviceBuffer<u8> d_labels(N); d_labels.memset(0);
 
-    // Daarna: roep jouw GPU-pipeline (ruisfilter → vlak-quickcheck → wedge) aan.
-    // (Zie aanroep-skel onderaan.)
+    // 3) Morton sort (voxel contiguous)
+    h_voxeliseer_morton(d_pts, d_keys, d_index, d_pts_sorted, d_voxelBereiken, N, mortonCfg);
+
+    std::cout << "gereed: points contiguous per voxel/regio" << std::endl;
+    std::cout << "[B] Boeren 2-buren ruisfilter..." << std::endl;
+
+    // Boeren filter
+    h_ruis_boeren(d_pts_sorted, d_labels);
+
+    std::cout << "klaar: ruis gelabeld" << std::endl;
+
+    // 4) Vlak-stemming current frame
+    std::cout << "[C] Vlak-stemming (brute, minimale support)..." << std::endl;
+
+    KandidaatAssen assen{};
+    h_vlak_vote_current_frame(d_pts_sorted, d_labels, assen);
+
+    if (!assen.heeftMinstensEenAs()) {
+        std::cout << "geen vlak in huidig frame. Brute planes…" << std::endl;
+        h_vlak_vote_bruteforce(d_pts_sorted, d_labels, assen);
+    }
+
+    if (!assen.heeftMinstensEenAs()) {
+        std::cout << "geen vlak gevonden. Brute buizen (annulus/wedge)…" << std::endl;
+        h_buis_vote_bruteforce(d_pts_sorted, d_labels, assen);
+    }
+
+    if (!assen.heeftMinstensEenAs()) {
+        std::cout << "[X] Geen eerste as te vinden (vlakken/buizen). Stop." << std::endl;
+        return;
+    }
+
+    std::cout << "eerste as gevonden (kandidaat #1)." << std::endl;
+
+    // 5) Orthonormaliseer + quat
+    Quat q = maak_quat_naar_ideaal_frame(assen);
+
+    std::cout << "[Autofit] Roteer naar ideaal frame (quaternion)…" << std::endl;
+
+    h_rotatie_quat_apply(d_pts_sorted, q, N);
+
+    // 6) Fine slabs labeling
+    h_fine_slabs_cyl_label(d_pts_sorted, d_labels);
+
+    // 7) Split to SoA on GPU, download
+    DeviceBuffer<float> d_x_out(N), d_y_out(N), d_z_out(N);
+    h_split_float3_to_soa(d_pts_sorted, d_x_out, d_y_out, d_z_out, N);
+
+    vector<float> rx(N), ry(N), rz(N);
+    d_x_out.download(rx.data(), N);
+    d_y_out.download(ry.data(), N);
+    d_z_out.download(rz.data(), N);
+
+    // 8) Back-permute: Sort axes on name ascending ('x'<'y'<'z') for orig order
+    array<AxisAccess, 3> back_axes;
+    back_axes[0] = {axes[0].name, move(axes[0].data), axes[0].V, {}};
+    back_axes[1] = {axes[1].name, move(axes[1].data), axes[1].V, {}};
+    back_axes[2] = {axes[2].name, move(axes[2].data), axes[2].V, {}};
+    sort(back_axes.begin(), back_axes.end(), [](const auto& a, const auto& b) { return a.name < b.name; });  // Orig order
+
+    // Batch write to CC (safe, no mutable in loop)
+    for (size_t i = 0; i < N; ++i) {
+        CCVector3* p = m_selectedCloud->getPointMutable(static_cast<unsigned>(i));
+        if (!p) continue;
+        p->x = back_axes[0].data[i];  // Orig 'x' data
+        p->y = back_axes[1].data[i];
+        p->z = back_axes[2].data[i];
+    }
+
+    std::cout << "[Autofit] Klaar: punten teruggezet in originele as-namen.\n";
+
+    // Debug rot: #ifdef DEBUG_ROT
+    // float3 euler = quat_to_euler(q);
+    // m_selectedCloud->rotate(CCVector3(1,0,0), euler.x * M_PI / 180.0f);  // Degrees to rad
+    // ... Y/Z
+    // #endif
 }
 
 // Helper to convert ReferenceCloud (from CloudSamplingTools) to

@@ -58,11 +58,11 @@
 #include <QTextStream>
 #include <QtGlobal> // For Qt::white etc.
 
+#include "types.h"
+
 // --- Project-specific forward declarations ---
 namespace Bocari
 {
-    using u32 = uint32_t;
-    using i32 = int32_t;
     template <typename T> constexpr u32 U32(T x) { return static_cast<u32>(x); }
     template <typename T> constexpr i32 I32(T x) { return static_cast<i32>(x); }
 
